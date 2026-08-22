@@ -1,6 +1,13 @@
 # Anthropic API Basics
 
-The smallest useful Anthropic API example: one call, one response, fully commented.
+The smallest useful Anthropic API examples: one call, one response, fully commented.
+Three files, from bare metal up to the SDK — read them in this order.
+
+| File | Dependencies | What it teaches |
+|---|---|---|
+| `raw_http_stdlib.py` | none (stdlib `urllib`) | There is no magic: one POST, one JSON reply |
+| `raw_http.py` | `httpx` | Same call with a normal HTTP library, error bodies shown |
+| `hello_claude.py` | `anthropic` | What the SDK adds on top: typed objects, retries, auth |
 
 ## Setup
 
@@ -15,10 +22,39 @@ Install the dependencies and run it:
 
 ```bash
 pip install -r requirements.txt
-python hello_claude.py
+python raw_http_stdlib.py   # first principles
+python raw_http.py          # raw JSON, pretty-printed
+python hello_claude.py      # the SDK version
 ```
 
-## What the example shows
+`raw_http_stdlib.py` reads the key from the environment directly, so for that
+one: `export ANTHROPIC_API_KEY=sk-ant-...` (or run it as
+`ANTHROPIC_API_KEY=$(grep ANTHROPIC_API_KEY ../.env | cut -d= -f2) python raw_http_stdlib.py`).
+
+## The entire API surface, in one shell command
+
+No Python at all — this is exactly what all three scripts do:
+
+```bash
+curl https://api.anthropic.com/v1/messages \
+  -H "x-api-key: $ANTHROPIC_API_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "content-type: application/json" \
+  -d '{
+    "model": "claude-haiku-4-5",
+    "max_tokens": 512,
+    "messages": [{"role": "user", "content": "What can you help me with?"}]
+  }'
+```
+
+Four headers-and-body facts worth memorizing:
+
+- **`x-api-key`**, not `Authorization: Bearer` — Anthropic is unusual here.
+- **`anthropic-version: 2023-06-01`** is required and pins the *schema*, not the model.
+- **`messages`** is the whole conversation, resent every call. The server is stateless.
+- **`max_tokens`** is required, and caps only the *response* length.
+
+## What the SDK example shows
 
 | Concept | Where |
 |---|---|
