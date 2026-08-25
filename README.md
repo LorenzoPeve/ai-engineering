@@ -1,17 +1,41 @@
 # AI Engineering
 
-A curated collection of YouTube videos and playlists on AI engineering — LLMs, agents, RAG, evals, prompt engineering, and building production AI systems.
+## Setup
 
-## Contents
+1. Create and activate a virtual environment, then install dependencies:
 
-- [Videos](#videos)
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
 
-## Videos
+2. Copy the env template and add your API key:
 
-<!-- Add videos here, e.g.:
-- [Video Title](https://www.youtube.com/watch?v=...) — short note on why it's worth watching
--->
+   ```bash
+   cp .env.template .env
+   ```
 
-## Contributing
+   Then edit `.env` and set your key from https://console.anthropic.com/settings/keys:
 
-This is a personal collection, but suggestions are welcome — open an issue or PR.
+   ```
+   ANTHROPIC_API_KEY=sk-ant-...
+   ```
+
+   `.env` is gitignored — never commit it.
+
+3. Verify it works:
+
+   ```bash
+   python anthropic-api-basics/hello_claude.py
+   ```
+
+   On success the script writes the full API response to
+   `anthropic-api-basics/output/api.json`:
+
+   ```bash
+   cat anthropic-api-basics/output/api.json
+   ```
+
+   If the key is missing or invalid you'll get an
+   `anthropic.AuthenticationError` instead.

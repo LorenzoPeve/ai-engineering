@@ -1,11 +1,3 @@
-"""
-The simplest Anthropic API call, using the official SDK.
-
-Run it:
-    pip install -r requirements.txt
-    python hello_claude.py
-"""
-
 from pathlib import Path
 
 import anthropic
@@ -17,7 +9,6 @@ MODEL = "claude-haiku-4-5"
 
 
 def main() -> None:
-    # Anthropic() reads ANTHROPIC_API_KEY from the environment.
     client = anthropic.Anthropic()
 
     response = client.messages.create(
@@ -29,18 +20,6 @@ def main() -> None:
         ],
     )
 
-    # content is a list of blocks (text, thinking, tool_use, ...), not a string.
-    for block in response.content:
-        if block.type == "text":
-            print(block.text)
-
-    print(f"\n--- stop_reason: {response.stop_reason}")
-    print(
-        f"--- tokens: {response.usage.input_tokens} in / "
-        f"{response.usage.output_tokens} out"
-    )
-
-    # Save to json
     out_dir = Path(__file__).resolve().parent / "output"
     out_dir.mkdir(exist_ok=True)
     (out_dir / "api.json").write_text(
