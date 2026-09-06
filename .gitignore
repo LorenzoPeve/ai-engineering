@@ -1,3 +1,5 @@
 .env
 
 */output/*
+session_management/data/
+__pycache__/
