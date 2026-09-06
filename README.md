@@ -20,7 +20,11 @@
 
    ```
    ANTHROPIC_API_KEY=sk-ant-...
+   ANTHROPIC_MODEL=claude-haiku-4-5-20251001
    ```
+
+   `ANTHROPIC_MODEL` sets the default model for `session_management/`; override
+   per-run with `--model`.
 
    `.env` is gitignored — never commit it.
 
