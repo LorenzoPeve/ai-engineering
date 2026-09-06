@@ -1,0 +1,730 @@
+{
+  "info": {
+    "name": "Anthropic Messages API — Learning Collection",
+    "description": "Hands-on tour of POST /v1/messages: response assembly, streaming, tool use (single, chained, parallel), errors, caching, and token counting.\n\nSetup: import the companion environment, set `apiKey` (secret), then run the folders top to bottom. Several requests chain — the tool-use requests write variables that the next request consumes, so run them in order the first time.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "https://api.anthropic.com", "type": "string" },
+    { "key": "anthropicVersion", "value": "2023-06-01", "type": "string" },
+    { "key": "model", "value": "claude-haiku-4-5", "type": "string" },
+    { "key": "apiKey", "value": "", "type": "string" }
+  ],
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      { "key": "key", "value": "x-api-key", "type": "string" },
+      { "key": "value", "value": "{{apiKey}}", "type": "string" },
+      { "key": "in", "value": "header", "type": "string" }
+    ]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "if (!pm.variables.get('apiKey')) {",
+          "  console.warn('apiKey is empty — set it in the environment before running.');",
+          "}"
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Shared helpers available to every request's own tests.",
+          "// (Postman runs collection-level tests after request-level ones,",
+          "//  so these assertions apply to all JSON responses.)",
+          "const ct = pm.response.headers.get('content-type') || '';",
+          "if (ct.includes('application/json')) {",
+          "  pm.test('response parses as JSON', () => pm.response.json());",
+          "}"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "1 — Basics",
+      "item": [
+        {
+          "name": "1.1 Hello Claude (minimal request)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('stop_reason is end_turn', () => pm.expect(body.stop_reason).to.eql('end_turn'));",
+                  "",
+                  "// ASSEMBLING THE TEXT RESPONSE:",
+                  "// content is an ARRAY of blocks, not a string. Concatenate every",
+                  "// block whose type is 'text'. Blocks of other types (thinking,",
+                  "// tool_use) live in the same array and must be skipped.",
+                  "const text = body.content.filter(b => b.type === 'text').map(b => b.text).join('');",
+                  "console.log('ASSEMBLED TEXT:\\n' + text);",
+                  "console.log('BLOCK TYPES: ' + body.content.map(b => b.type).join(', '));",
+                  "console.log('USAGE: ' + JSON.stringify(body.usage));",
+                  "pm.collectionVariables.set('lastText', text);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "anthropic-version", "value": "{{anthropicVersion}}" },
+              { "key": "content-type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"max_tokens\": 512,\n  \"system\": \"You are a concise assistant. Answer in one short sentence.\",\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"What is the Anthropic Messages API?\" }\n  ]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/v1/messages", "host": ["{{baseUrl}}"], "path": ["v1", "messages"] },
+            "description": "The smallest valid request. Note what comes back: `content` is an array of blocks, `stop_reason` tells you why generation ended, and `usage` reports the token split. Open the Console (Ctrl/Cmd+Alt+C) to see the assembled text the test script builds."
+          }
+        },
+        {
+          "name": "1.2 Multi-turn conversation (statelessness)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "const text = body.content.filter(b => b.type === 'text').map(b => b.text).join('');",
+                  "console.log('ASSEMBLED TEXT:\\n' + text);",
+                  "pm.test('remembers the name from turn 1', () => pm.expect(text.toLowerCase()).to.include('alice'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "anthropic-version", "value": "{{anthropicVersion}}" },
+              { "key": "content-type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"max_tokens\": 512,\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"My name is Alice.\" },\n    { \"role\": \"assistant\", \"content\": \"Nice to meet you, Alice.\" },\n    { \"role\": \"user\", \"content\": \"What is my name?\" }\n  ]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/v1/messages", "host": ["{{baseUrl}}"], "path": ["v1", "messages"] },
+            "description": "The API is stateless: there is no conversation ID. \"Memory\" is just you resending the full `messages` array, alternating user/assistant. Delete the middle two entries and Claude no longer knows the name."
+          }
+        },
+        {
+          "name": "1.3 Streaming (SSE) — assemble text from deltas",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Postman shows the raw SSE stream. Same assembly problem as 1.1,",
+                  "// but one delta at a time: content_block_delta events carry",
+                  "// text_delta fragments that you concatenate per block index.",
+                  "const raw = pm.response.text();",
+                  "const events = raw.split('\\n').filter(l => l.startsWith('data: ')).map(l => l.slice(6));",
+                  "let text = '';",
+                  "const seen = new Set();",
+                  "events.forEach(line => {",
+                  "  let e; try { e = JSON.parse(line); } catch (err) { return; }",
+                  "  seen.add(e.type);",
+                  "  if (e.type === 'content_block_delta' && e.delta && e.delta.type === 'text_delta') {",
+                  "    text += e.delta.text;",
+                  "  }",
+                  "});",
+                  "console.log('EVENT TYPES SEEN: ' + [...seen].join(', '));",
+                  "console.log('ASSEMBLED FROM DELTAS:\\n' + text);",
+                  "pm.test('saw message_start and message_stop', () => {",
+                  "  pm.expect(seen.has('message_start')).to.be.true;",
+                  "  pm.expect(seen.has('message_stop')).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "anthropic-version", "value": "{{anthropicVersion}}" },
+              { "key": "content-type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"max_tokens\": 512,\n  \"stream\": true,\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"Count from 1 to 10, one number per line.\" }\n  ]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/v1/messages", "host": ["{{baseUrl}}"], "path": ["v1", "messages"] },
+            "description": "Add `\"stream\": true` and the same endpoint returns text/event-stream. The event sequence is: message_start → (content_block_start → content_block_delta* → content_block_stop)* → message_delta (carries the final stop_reason and output token count) → message_stop.\n\nThe console log shows the text rebuilt from the deltas — that's exactly what an SDK's stream helper does for you."
+          }
+        },
+        {
+          "name": "1.4 Count tokens before sending",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "console.log('INPUT TOKENS: ' + body.input_tokens);",
+                  "pm.test('returns input_tokens', () => pm.expect(body.input_tokens).to.be.a('number'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "anthropic-version", "value": "{{anthropicVersion}}" },
+              { "key": "content-type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"system\": \"You are a concise assistant.\",\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"What is the Anthropic Messages API?\" }\n  ]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/v1/messages/count_tokens", "host": ["{{baseUrl}}"], "path": ["v1", "messages", "count_tokens"] },
+            "description": "Same body shape as /v1/messages, minus `max_tokens`. Free, no generation. Add the `tools` array from folder 3 and re-run to see how much your tool schemas cost on every single request — that's the usual surprise."
+          }
+        },
+        {
+          "name": "1.5 List models",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "anthropic-version", "value": "{{anthropicVersion}}" }],
+            "url": { "raw": "{{baseUrl}}/v1/models", "host": ["{{baseUrl}}"], "path": ["v1", "models"] },
+            "description": "Live list of model IDs available to your key, with context window and output caps. Use this instead of hardcoding IDs from memory."
+          }
+        }
+      ]
+    },
+    {
+      "name": "2 — Content blocks & stop reasons",
+      "item": [
+        {
+          "name": "2.1 Narrate, then call (text + tool_use in one response)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "console.log('BLOCK TYPES: ' + body.content.map(b => b.type).join(', '));",
+                  "console.log('STOP REASON: ' + body.stop_reason);",
+                  "const text = body.content.filter(b => b.type === 'text').map(b => b.text).join('');",
+                  "console.log('NARRATION: ' + text);",
+                  "pm.test('one response, two block types', () => {",
+                  "  pm.expect(body.content.some(b => b.type === 'text')).to.be.true;",
+                  "  pm.expect(body.content.some(b => b.type === 'tool_use')).to.be.true;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "anthropic-version", "value": "{{anthropicVersion}}" },
+              { "key": "content-type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"max_tokens\": 1024,\n  \"system\": \"Before using any tool, briefly tell the user what you are about to do and why, in one short sentence. Then make the call.\",\n  \"tools\": [\n    {\n      \"name\": \"get_weather\",\n      \"description\": \"Get the current weather for a single city.\",\n      \"input_schema\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"city\": { \"type\": \"string\", \"description\": \"City name, e.g. 'Austin'\" },\n          \"unit\": { \"type\": \"string\", \"enum\": [\"celsius\", \"fahrenheit\"] }\n        },\n        \"required\": [\"city\"]\n      }\n    }\n  ],\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"What's the weather in Austin?\" }\n  ]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/v1/messages", "host": ["{{baseUrl}}"], "path": ["v1", "messages"] },
+            "description": "This is why `content` is an array. One assistant turn holds a `text` block AND a `tool_use` block. Naive code that does `content[0].text` works here by luck and breaks the moment the order flips — always filter by `type`."
+          }
+        },
+        {
+          "name": "2.2 Extended thinking",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "console.log('BLOCK TYPES: ' + body.content.map(b => b.type).join(', '));",
+                  "const thinking = body.content.filter(b => b.type === 'thinking').map(b => b.thinking).join('');",
+                  "console.log('THINKING:\\n' + thinking.slice(0, 800));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "anthropic-version", "value": "{{anthropicVersion}}" },
+              { "key": "content-type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"max_tokens\": 3000,\n  \"thinking\": { \"type\": \"enabled\", \"budget_tokens\": 2000 },\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"A train leaves Austin at 2pm going 60mph. Another leaves Dallas at 3pm going 80mph toward it. Austin to Dallas is 195 miles. When do they meet?\" }\n  ]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/v1/messages", "host": ["{{baseUrl}}"], "path": ["v1", "messages"] },
+            "description": "A third block type: `thinking`, which arrives before the `text` block. Shown here with the `budget_tokens` form because this collection defaults to claude-haiku-4-5.\n\nOn Claude Opus 5 / Sonnet 5 / Opus 4.6+ this form is REJECTED with a 400 — those models use `\"thinking\": {\"type\": \"adaptive\", \"display\": \"summarized\"}` plus `\"output_config\": {\"effort\": \"high\"}` instead. Swap `model` to `claude-opus-5` and try both bodies to see the error — a useful thing to have felt once."
+          }
+        },
+        {
+          "name": "2.3 Truncation (stop_reason: max_tokens)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "pm.test('stopped on max_tokens', () => pm.expect(body.stop_reason).to.eql('max_tokens'));",
+                  "console.log('TRUNCATED TEXT: ' + body.content.filter(b => b.type === 'text').map(b => b.text).join(''));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "anthropic-version", "value": "{{anthropicVersion}}" },
+              { "key": "content-type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"max_tokens\": 16,\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"Write a detailed paragraph about the history of the printing press.\" }\n  ]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/v1/messages", "host": ["{{baseUrl}}"], "path": ["v1", "messages"] },
+            "description": "HTTP 200, valid JSON, sentence cut mid-word. This failure is silent unless you check `stop_reason` — the single most common bug in first-draft API code."
+          }
+        }
+      ]
+    },
+    {
+      "name": "3 — Tool use round trip",
+      "item": [
+        {
+          "name": "3.1 Single tool call → capture tool_use_id",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "pm.test('stop_reason is tool_use', () => pm.expect(body.stop_reason).to.eql('tool_use'));",
+                  "",
+                  "const call = body.content.find(b => b.type === 'tool_use');",
+                  "console.log('TOOL: ' + call.name + '  INPUT: ' + JSON.stringify(call.input));",
+                  "",
+                  "// Build the follow-up messages array for request 3.2.",
+                  "// Rule: echo the assistant turn back VERBATIM (all blocks), then send",
+                  "// a user turn whose content is the tool_result blocks.",
+                  "const fakeWeather = { Austin: '97F, sunny', Denver: '58F, snow flurries', Miami: '88F, thunderstorms' };",
+                  "const messages = [",
+                  "  { role: 'user', content: \"What's the weather in Austin?\" },",
+                  "  { role: 'assistant', content: body.content },",
+                  "  { role: 'user', content: [{",
+                  "      type: 'tool_result',",
+                  "      tool_use_id: call.id,",
+                  "      content: fakeWeather[call.input.city] || ('no data for ' + call.input.city)",
+                  "  }] }",
+                  "];",
+                  "pm.collectionVariables.set('singleToolMessages', JSON.stringify(messages, null, 2));",
+                  "console.log('Saved messages for 3.2 (collection variable singleToolMessages).');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "anthropic-version", "value": "{{anthropicVersion}}" },
+              { "key": "content-type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"max_tokens\": 1024,\n  \"tools\": [\n    {\n      \"name\": \"get_weather\",\n      \"description\": \"Get the current weather for a single city.\",\n      \"input_schema\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"city\": { \"type\": \"string\", \"description\": \"City name, e.g. 'Austin'\" }\n        },\n        \"required\": [\"city\"]\n      }\n    }\n  ],\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"What's the weather in Austin?\" }\n  ]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/v1/messages", "host": ["{{baseUrl}}"], "path": ["v1", "messages"] },
+            "description": "Claude does NOT run your tool. It returns a `tool_use` block — an intent — and stops with `stop_reason: \"tool_use\"`. The test script executes a fake weather lookup and stashes the follow-up conversation in a collection variable. Run 3.2 next."
+          }
+        },
+        {
+          "name": "3.2 Return tool_result → final answer",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('singleToolMessages')) {",
+                  "  throw new Error('Run 3.1 first — it populates singleToolMessages.');",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "pm.test('now ends the turn', () => pm.expect(body.stop_reason).to.eql('end_turn'));",
+                  "console.log('FINAL ANSWER:\\n' + body.content.filter(b => b.type === 'text').map(b => b.text).join(''));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "anthropic-version", "value": "{{anthropicVersion}}" },
+              { "key": "content-type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"max_tokens\": 1024,\n  \"tools\": [\n    {\n      \"name\": \"get_weather\",\n      \"description\": \"Get the current weather for a single city.\",\n      \"input_schema\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"city\": { \"type\": \"string\", \"description\": \"City name, e.g. 'Austin'\" }\n        },\n        \"required\": [\"city\"]\n      }\n    }\n  ],\n  \"messages\": {{singleToolMessages}}\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/v1/messages", "host": ["{{baseUrl}}"], "path": ["v1", "messages"] },
+            "description": "The `messages` array is injected from 3.1. Three things must hold or you get a 400:\n1. The assistant turn is echoed back with its blocks intact.\n2. `tool_use_id` matches exactly.\n3. `tools` is still declared on this request — tool definitions are per-request, not remembered.\n\nTry breaking each one on purpose. The error messages are worth reading."
+          }
+        },
+        {
+          "name": "3.3 Parallel tool calls → capture all ids",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "const calls = body.content.filter(b => b.type === 'tool_use');",
+                  "console.log('PARALLEL CALLS: ' + calls.length);",
+                  "calls.forEach(c => console.log('  ' + c.name + ' ' + JSON.stringify(c.input) + '  id=' + c.id));",
+                  "pm.test('more than one tool_use block', () => pm.expect(calls.length).to.be.above(1));",
+                  "",
+                  "const weather = { Austin: '97F, sunny', Denver: '58F, snow flurries', Miami: '88F, thunderstorms' };",
+                  "const times   = { Austin: '3:42 PM CDT (UTC-5)', Denver: '2:42 PM MDT (UTC-6)', Miami: '4:42 PM EDT (UTC-4)' };",
+                  "",
+                  "// KEY RULE: every tool_result goes in ONE user message.",
+                  "const results = calls.map(c => {",
+                  "  const table = c.name === 'get_weather' ? weather : times;",
+                  "  return {",
+                  "    type: 'tool_result',",
+                  "    tool_use_id: c.id,",
+                  "    content: table[c.input.city] || ('no data for ' + c.input.city)",
+                  "  };",
+                  "});",
+                  "",
+                  "const messages = [",
+                  "  { role: 'user', content: 'Compare the current weather in Austin, Denver, and Miami.' },",
+                  "  { role: 'assistant', content: body.content },",
+                  "  { role: 'user', content: results }",
+                  "];",
+                  "pm.collectionVariables.set('parallelToolMessages', JSON.stringify(messages, null, 2));",
+                  "console.log('Saved messages for 3.4 (collection variable parallelToolMessages).');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "anthropic-version", "value": "{{anthropicVersion}}" },
+              { "key": "content-type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"max_tokens\": 1024,\n  \"tool_choice\": { \"type\": \"auto\", \"disable_parallel_tool_use\": false },\n  \"tools\": [\n    {\n      \"name\": \"get_weather\",\n      \"description\": \"Get the current weather for a single city.\",\n      \"input_schema\": {\n        \"type\": \"object\",\n        \"properties\": { \"city\": { \"type\": \"string\" } },\n        \"required\": [\"city\"]\n      }\n    },\n    {\n      \"name\": \"get_timezone\",\n      \"description\": \"Get the current local time and UTC offset for a city.\",\n      \"input_schema\": {\n        \"type\": \"object\",\n        \"properties\": { \"city\": { \"type\": \"string\" } },\n        \"required\": [\"city\"]\n      }\n    }\n  ],\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"Compare the current weather in Austin, Denver, and Miami.\" }\n  ]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/v1/messages", "host": ["{{baseUrl}}"], "path": ["v1", "messages"] },
+            "description": "One assistant turn, three `tool_use` blocks. Your job is to run them concurrently and return all three results together.\n\nFlip `disable_parallel_tool_use` to `true` and re-run: you get one call per turn instead, which costs three round trips for the same answer."
+          }
+        },
+        {
+          "name": "3.4 Return ALL tool_results in one user message",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('parallelToolMessages')) {",
+                  "  throw new Error('Run 3.3 first — it populates parallelToolMessages.');",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "console.log('FINAL ANSWER:\\n' + body.content.filter(b => b.type === 'text').map(b => b.text).join(''));",
+                  "console.log('STOP REASON: ' + body.stop_reason);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "anthropic-version", "value": "{{anthropicVersion}}" },
+              { "key": "content-type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"max_tokens\": 1024,\n  \"tools\": [\n    {\n      \"name\": \"get_weather\",\n      \"description\": \"Get the current weather for a single city.\",\n      \"input_schema\": {\n        \"type\": \"object\",\n        \"properties\": { \"city\": { \"type\": \"string\" } },\n        \"required\": [\"city\"]\n      }\n    },\n    {\n      \"name\": \"get_timezone\",\n      \"description\": \"Get the current local time and UTC offset for a city.\",\n      \"input_schema\": {\n        \"type\": \"object\",\n        \"properties\": { \"city\": { \"type\": \"string\" } },\n        \"required\": [\"city\"]\n      }\n    }\n  ],\n  \"messages\": {{parallelToolMessages}}\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/v1/messages", "host": ["{{baseUrl}}"], "path": ["v1", "messages"] },
+            "description": "All N `tool_result` blocks ride in a SINGLE user message. Splitting them across several user messages is accepted by the API but quietly teaches the model to stop batching calls — and it's the bug you'd never find from a stack trace."
+          }
+        },
+        {
+          "name": "3.5 Forced tool use (tool_choice)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "anthropic-version", "value": "{{anthropicVersion}}" },
+              { "key": "content-type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"max_tokens\": 1024,\n  \"tool_choice\": { \"type\": \"tool\", \"name\": \"get_weather\" },\n  \"tools\": [\n    {\n      \"name\": \"get_weather\",\n      \"description\": \"Get the current weather for a single city.\",\n      \"input_schema\": {\n        \"type\": \"object\",\n        \"properties\": { \"city\": { \"type\": \"string\" } },\n        \"required\": [\"city\"]\n      }\n    }\n  ],\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"Hi, how are you today?\" }\n  ]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/v1/messages", "host": ["{{baseUrl}}"], "path": ["v1", "messages"] },
+            "description": "The question has nothing to do with weather, but `tool_choice: {type: \"tool\"}` forces the call anyway — watch what it invents for `city`. This is the structured-extraction trick (force a tool whose schema is your output shape) and also a caution: forcing removes Claude's judgment.\n\nOther values: `{\"type\":\"any\"}` (must use some tool), `{\"type\":\"auto\"}` (default), `{\"type\":\"none\"}`."
+          }
+        },
+        {
+          "name": "3.6 Tool failure (is_error)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "console.log('RECOVERY:\\n' + body.content.filter(b => b.type === 'text').map(b => b.text).join(''));",
+                  "console.log('Did it retry with a tool_use block? ' + body.content.some(b => b.type === 'tool_use'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "anthropic-version", "value": "{{anthropicVersion}}" },
+              { "key": "content-type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"max_tokens\": 1024,\n  \"tools\": [\n    {\n      \"name\": \"get_weather\",\n      \"description\": \"Get the current weather for a single city.\",\n      \"input_schema\": {\n        \"type\": \"object\",\n        \"properties\": { \"city\": { \"type\": \"string\" } },\n        \"required\": [\"city\"]\n      }\n    }\n  ],\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"What's the weather in Austin?\" },\n    {\n      \"role\": \"assistant\",\n      \"content\": [\n        { \"type\": \"tool_use\", \"id\": \"toolu_01FAKEID0000000000000001\", \"name\": \"get_weather\", \"input\": { \"city\": \"Austin\" } }\n      ]\n    },\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\n          \"type\": \"tool_result\",\n          \"tool_use_id\": \"toolu_01FAKEID0000000000000001\",\n          \"is_error\": true,\n          \"content\": \"ConnectionError: weather service timed out after 30s\"\n        }\n      ]\n    }\n  ]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/v1/messages", "host": ["{{baseUrl}}"], "path": ["v1", "messages"] },
+            "description": "Hand-written history with a synthetic tool_use id — proof that the API only checks that ids match within the request, not that it issued them.\n\nReturn failures as `tool_result` with `is_error: true` rather than dropping the block or throwing. Claude reads the error text and decides whether to retry, try a different city spelling, or tell the user. Dropping the block is a 400."
+          }
+        }
+      ]
+    },
+    {
+      "name": "4 — Errors & headers",
+      "item": [
+        {
+          "name": "4.1 401 — bad API key",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401', () => pm.response.to.have.status(401));",
+                  "console.log(JSON.stringify(pm.response.json(), null, 2));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "apikey",
+              "apikey": [
+                { "key": "key", "value": "x-api-key", "type": "string" },
+                { "key": "value", "value": "sk-ant-invalid-key", "type": "string" },
+                { "key": "in", "value": "header", "type": "string" }
+              ]
+            },
+            "method": "POST",
+            "header": [
+              { "key": "anthropic-version", "value": "{{anthropicVersion}}" },
+              { "key": "content-type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"max_tokens\": 64,\n  \"messages\": [{ \"role\": \"user\", \"content\": \"hi\" }]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/v1/messages", "host": ["{{baseUrl}}"], "path": ["v1", "messages"] },
+            "description": "Error envelope shape: `{\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"...\"}}`. Every failure uses this shape — branch on `error.type`, not on the message string."
+          }
+        },
+        {
+          "name": "4.2 400 — unknown model",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "console.log(JSON.stringify(pm.response.json(), null, 2));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "anthropic-version", "value": "{{anthropicVersion}}" },
+              { "key": "content-type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"claude-does-not-exist\",\n  \"max_tokens\": 64,\n  \"messages\": [{ \"role\": \"user\", \"content\": \"hi\" }]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/v1/messages", "host": ["{{baseUrl}}"], "path": ["v1", "messages"] },
+            "description": "Also what a hallucinated date-suffixed model ID looks like from the server's side."
+          }
+        },
+        {
+          "name": "4.3 400 — missing max_tokens",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "console.log(JSON.stringify(pm.response.json(), null, 2));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "anthropic-version", "value": "{{anthropicVersion}}" },
+              { "key": "content-type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"messages\": [{ \"role\": \"user\", \"content\": \"hi\" }]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/v1/messages", "host": ["{{baseUrl}}"], "path": ["v1", "messages"] },
+            "description": "`max_tokens` is required on /v1/messages (and only there — count_tokens doesn't take it). Note how the validation error points at the exact field path."
+          }
+        },
+        {
+          "name": "4.4 Rate limit headers",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const interesting = ['request-id', 'anthropic-ratelimit-requests-limit', 'anthropic-ratelimit-requests-remaining', 'anthropic-ratelimit-requests-reset', 'anthropic-ratelimit-input-tokens-remaining', 'anthropic-ratelimit-output-tokens-remaining', 'retry-after'];",
+                  "interesting.forEach(h => {",
+                  "  const v = pm.response.headers.get(h);",
+                  "  if (v) console.log(h + ': ' + v);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "anthropic-version", "value": "{{anthropicVersion}}" },
+              { "key": "content-type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"max_tokens\": 32,\n  \"messages\": [{ \"role\": \"user\", \"content\": \"Say hi.\" }]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/v1/messages", "host": ["{{baseUrl}}"], "path": ["v1", "messages"] },
+            "description": "Nothing special about the body — look at the Headers tab and the console. `request-id` is what you quote in a support ticket; the ratelimit headers are what a production client should watch to back off *before* it gets a 429."
+          }
+        }
+      ]
+    },
+    {
+      "name": "5 — Cost & caching",
+      "item": [
+        {
+          "name": "5.1 Prompt caching — write (run first)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const u = pm.response.json().usage;",
+                  "console.log('USAGE: ' + JSON.stringify(u, null, 2));",
+                  "console.log('cache_creation_input_tokens (written to cache): ' + u.cache_creation_input_tokens);",
+                  "console.log('cache_read_input_tokens (served from cache): ' + u.cache_read_input_tokens);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "anthropic-version", "value": "{{anthropicVersion}}" },
+              { "key": "content-type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"max_tokens\": 256,\n  \"system\": [\n    {\n      \"type\": \"text\",\n      \"text\": \"You are a support assistant for the ACME Widget Co. POLICY MANUAL (excerpt, repeated to exceed the cache minimum): Returns are accepted within 30 days of delivery with proof of purchase. Refunds are issued to the original payment method within 5 business days of receipt. Exchanges are permitted for the same SKU only. Shipping costs are non-refundable except where the item arrived damaged or the wrong item was shipped. Damaged items must be reported within 48 hours of delivery with photographic evidence. Warranty claims cover manufacturing defects for 12 months from purchase and exclude normal wear, misuse, and unauthorized repair. Expedited shipping upgrades are non-refundable once the order has shipped. Gift receipts entitle the bearer to store credit at the last sold price. International orders are subject to local duties which are the responsibility of the recipient. Bulk orders over 50 units require a signed purchase agreement and are non-returnable. Price matching is offered against authorized retailers within 14 days of purchase with documentation. Loyalty points expire 24 months after the date of issue and cannot be transferred. Subscriptions may be cancelled at any time and remain active through the end of the paid period. Accounts inactive for 36 months may be closed after written notice. Disputes are governed by the laws of the State of Texas. Returns are accepted within 30 days of delivery with proof of purchase. Refunds are issued to the original payment method within 5 business days of receipt. Exchanges are permitted for the same SKU only. Shipping costs are non-refundable except where the item arrived damaged or the wrong item was shipped. Damaged items must be reported within 48 hours of delivery with photographic evidence. Warranty claims cover manufacturing defects for 12 months from purchase and exclude normal wear, misuse, and unauthorized repair. Expedited shipping upgrades are non-refundable once the order has shipped. Gift receipts entitle the bearer to store credit at the last sold price. International orders are subject to local duties which are the responsibility of the recipient. Bulk orders over 50 units require a signed purchase agreement and are non-returnable. Price matching is offered against authorized retailers within 14 days of purchase with documentation. Loyalty points expire 24 months after the date of issue and cannot be transferred. Subscriptions may be cancelled at any time and remain active through the end of the paid period. Accounts inactive for 36 months may be closed after written notice. Disputes are governed by the laws of the State of Texas.\",\n      \"cache_control\": { \"type\": \"ephemeral\" }\n    }\n  ],\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"How long do I have to report a damaged item?\" }\n  ]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/v1/messages", "host": ["{{baseUrl}}"], "path": ["v1", "messages"] },
+            "description": "First call writes the cache: `cache_creation_input_tokens` is non-zero, `cache_read_input_tokens` is 0. Caching is a PREFIX match with a ~1024-token minimum, which is why the policy text is repeated — a short system prompt silently won't cache at all."
+          }
+        },
+        {
+          "name": "5.2 Prompt caching — read (run within 5 min)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const u = pm.response.json().usage;",
+                  "console.log('USAGE: ' + JSON.stringify(u, null, 2));",
+                  "pm.test('cache hit', () => pm.expect(u.cache_read_input_tokens).to.be.above(0));",
+                  "console.log('If this failed: the system text differs from 5.1 by at least one byte, it is under ~1024 tokens, or the 5-minute TTL expired.');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "anthropic-version", "value": "{{anthropicVersion}}" },
+              { "key": "content-type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"max_tokens\": 256,\n  \"system\": [\n    {\n      \"type\": \"text\",\n      \"text\": \"You are a support assistant for the ACME Widget Co. POLICY MANUAL (excerpt, repeated to exceed the cache minimum): Returns are accepted within 30 days of delivery with proof of purchase. Refunds are issued to the original payment method within 5 business days of receipt. Exchanges are permitted for the same SKU only. Shipping costs are non-refundable except where the item arrived damaged or the wrong item was shipped. Damaged items must be reported within 48 hours of delivery with photographic evidence. Warranty claims cover manufacturing defects for 12 months from purchase and exclude normal wear, misuse, and unauthorized repair. Expedited shipping upgrades are non-refundable once the order has shipped. Gift receipts entitle the bearer to store credit at the last sold price. International orders are subject to local duties which are the responsibility of the recipient. Bulk orders over 50 units require a signed purchase agreement and are non-returnable. Price matching is offered against authorized retailers within 14 days of purchase with documentation. Loyalty points expire 24 months after the date of issue and cannot be transferred. Subscriptions may be cancelled at any time and remain active through the end of the paid period. Accounts inactive for 36 months may be closed after written notice. Disputes are governed by the laws of the State of Texas. Returns are accepted within 30 days of delivery with proof of purchase. Refunds are issued to the original payment method within 5 business days of receipt. Exchanges are permitted for the same SKU only. Shipping costs are non-refundable except where the item arrived damaged or the wrong item was shipped. Damaged items must be reported within 48 hours of delivery with photographic evidence. Warranty claims cover manufacturing defects for 12 months from purchase and exclude normal wear, misuse, and unauthorized repair. Expedited shipping upgrades are non-refundable once the order has shipped. Gift receipts entitle the bearer to store credit at the last sold price. International orders are subject to local duties which are the responsibility of the recipient. Bulk orders over 50 units require a signed purchase agreement and are non-returnable. Price matching is offered against authorized retailers within 14 days of purchase with documentation. Loyalty points expire 24 months after the date of issue and cannot be transferred. Subscriptions may be cancelled at any time and remain active through the end of the paid period. Accounts inactive for 36 months may be closed after written notice. Disputes are governed by the laws of the State of Texas.\",\n      \"cache_control\": { \"type\": \"ephemeral\" }\n    }\n  ],\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"Can I return a bulk order of 80 units?\" }\n  ]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/v1/messages", "host": ["{{baseUrl}}"], "path": ["v1", "messages"] },
+            "description": "Identical system prefix, different question → `cache_read_input_tokens` is non-zero at ~10% of the cost. Now go edit ONE character in the system text and re-run: the hit disappears. That single experiment explains most \"why is my cache hit rate zero\" bugs (a timestamp or UUID in the prompt)."
+          }
+        }
+      ]
+    }
+  ]
+}

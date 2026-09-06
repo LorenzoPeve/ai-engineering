@@ -1,2 +1,8 @@
 anthropic>=1.0.0
 python-dotenv>=1.0.0
+
+# Optional: only for the Postgres backend (session_management/postgres_store.py)
+# psycopg[binary]>=3.2
+
+google-adk>=2.8.0
+litellm>=1.100.0
