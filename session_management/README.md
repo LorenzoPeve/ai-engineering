@@ -98,7 +98,16 @@ python session_management/chat.py --list
 python session_management/chat.py --resume sess_ab12cd34ef56
 python session_management/chat.py --log sess_ab12cd34ef56
 python session_management/chat.py --no-memory         # harness off, endpoint raw
+python session_management/chat.py --show-payload      # print each request body
 ```
+
+`--show-payload` prints the exact JSON body of every request to stderr before
+it goes out — messages array, system prompt, and the per-model `thinking` /
+`output_config` shaping from `llm.py`. It ends with a count of the messages on
+the wire, so you can watch the resend grow (or stay pinned at 1 under
+`--no-memory`). Pair it with `--no-memory` to see the two shapes side by side,
+or redirect stderr to keep the transcript clean:
+`python session_management/chat.py --show-payload 2> payloads.log`.
 
 Watch `input_tokens` climb in the `usage` events across a conversation — that
 is the stateless resend, in numbers. It's also why prompt caching exists.

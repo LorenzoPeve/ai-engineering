@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -49,6 +51,7 @@ class LLM:
     max_tokens: int = 16000
     effort: str = "high"  # low | medium | high | xhigh | max (current gen only)
     thinking_budget: int | None = None  # older models only; must be >= 1024
+    show_payload: bool = False  # print the request body before every call
     client: anthropic.Anthropic = field(default_factory=anthropic.Anthropic)
 
     def _request_kwargs(self, messages, system) -> dict[str, Any]:
@@ -74,11 +77,26 @@ class LLM:
             }
         return kwargs
 
+    def _dump_payload(self, kwargs: dict[str, Any]) -> None:
+        """Print the exact request body, so you can watch the messages array
+        grow (or not, with --no-memory) turn by turn. stderr, so piping the
+        conversation somewhere still works."""
+        body = dict(kwargs, stream=True)  # the SDK adds this; show the truth
+        print("--- request ---", file=sys.stderr)
+        print(json.dumps(body, indent=2, default=str), file=sys.stderr)
+        print(
+            f"--- {len(kwargs['messages'])} message(s) on the wire ---\n",
+            file=sys.stderr,
+        )
+
     def complete(
         self,
         messages: list[dict[str, Any]],
         system: str | None = None,
     ) -> Message:
         """One turn. Streams so long replies can't trip the HTTP timeout."""
-        with self.client.messages.stream(**self._request_kwargs(messages, system)) as stream:
+        kwargs = self._request_kwargs(messages, system)
+        if self.show_payload:
+            self._dump_payload(kwargs)
+        with self.client.messages.stream(**kwargs) as stream:
             return stream.get_final_message()

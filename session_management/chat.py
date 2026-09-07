@@ -6,6 +6,7 @@
     python session_management/chat.py --backend jsonl
     python session_management/chat.py --backend postgres     # needs DATABASE_URL
     python session_management/chat.py --no-memory            # stateless: no history sent
+    python session_management/chat.py --show-payload        # print each request body
 """
 
 from __future__ import annotations
@@ -47,6 +48,11 @@ def main() -> None:
         action="store_true",
         help="send only the current turn (the raw stateless API, no history)",
     )
+    parser.add_argument(
+        "--show-payload",
+        action="store_true",
+        help="print the full request body sent to the API on every turn (stderr)",
+    )
     args = parser.parse_args()
 
     (HERE / "data").mkdir(exist_ok=True)
@@ -62,7 +68,7 @@ def main() -> None:
             print(f"[{event.seq:>3}] {event.ts} {event.type:<18} {event.payload}")
         return
 
-    llm = LLM(model=args.model)
+    llm = LLM(model=args.model, show_payload=args.show_payload)
 
     remember = not args.no_memory
 
